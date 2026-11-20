@@ -1285,6 +1285,9 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         ggml_op op;
         if (tn.suffix != nullptr && strcmp(tn.suffix, "bias") == 0) {
             op = info.op == GGML_OP_MUL_MAT_ID ? GGML_OP_ADD_ID : GGML_OP_ADD;
+        } else if (tn.suffix != nullptr && (strcmp(tn.suffix, "lb_g") == 0 || strcmp(tn.suffix, "lb_g_r") == 0)) {
+            // LittleBit input scale, multiplied elementwise into the activations
+            op = GGML_OP_MUL;
         } else if (hparams.router_layer >= 0 && tn.suffix != nullptr &&
                 (strcmp(tn.suffix, "lora_a") == 0 || strcmp(tn.suffix, "lora_b") == 0)) {
             op = GGML_OP_MUL_MAT_ID;

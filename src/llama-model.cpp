@@ -4046,6 +4046,49 @@ void llama_model_base::create_tensor_gate_up_exps(llama_layer & layer, int bid, 
     }
 }
 
+ggml_tensor * llama_model_base::create_tensor_lb(const LLM_TN_IMPL & tn_w, int64_t n_in, int64_t n_out, int flags) {
+    GGML_ASSERT(ml != nullptr);
+
+    const auto name = [&](const char * suffix) {
+        return LLM_TN_IMPL(tn_w.arch, tn_w.tensor, suffix, tn_w.bid, tn_w.xid);
+    };
+
+    const ggml_tensor * u_meta = ml->get_tensor_meta(name("lb_u").str().c_str());
+    if (u_meta == nullptr || (flags & TENSOR_SKIP)) {
+        return create_tensor(tn_w, {n_in, n_out}, flags);
+    }
+
+    const auto load_path = [&](const char * su, const char * sv, const char * sg, int path_flags) {
+        llama_lb_path p;
+        const ggml_tensor * um = ml->get_tensor_meta(name(su).str().c_str());
+        const ggml_tensor * vm = ml->get_tensor_meta(name(sv).str().c_str());
+        if (um == nullptr && vm == nullptr && (path_flags & TENSOR_NOT_REQUIRED)) {
+            return p;
+        }
+        if (um == nullptr || vm == nullptr) {
+            throw std::runtime_error(format("LittleBit tensor '%s': incomplete factor set", name(su).str().c_str()));
+        }
+        // the rank is read from the file and may differ per layer and projection
+        const int64_t r_pad = um->ne[0];
+        const int64_t r     = vm->ne[1];
+        if (r > r_pad) {
+            throw std::runtime_error(format("LittleBit tensor '%s': rank %lld > padded rank %lld",
+                    name(su).str().c_str(), (long long) r, (long long) r_pad));
+        }
+        p.u = create_tensor(name(su), {r_pad, n_out}, 0);
+        p.v = create_tensor(name(sv), {n_in,  r},     0);
+        p.g = create_tensor(name(sg), {n_in},         0);
+        return p;
+    };
+
+    llama_lb_weight lw;
+    lw.main = load_path("lb_u",   "lb_v",   "lb_g",   0);
+    lw.res  = load_path("lb_u_r", "lb_v_r", "lb_g_r", TENSOR_NOT_REQUIRED);
+
+    model->lb[lw.main.u] = lw;
+    return lw.main.u;
+}
+
 void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
         int64_t n_embd_, int64_t n_embd_q_, int64_t n_embd_k_, int64_t n_embd_v_,
         int flags) {
@@ -4075,9 +4118,9 @@ void llama_model_base::create_tensor_qkv(llama_layer & layer, int bid,
             layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", bid), {n_embd_v_}, TENSOR_NOT_REQUIRED);
         }
     } else {
-        layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q, "weight", bid), {n_embd_, n_embd_q_}, flags);
-        layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K, "weight", bid), {n_embd_, n_embd_k_}, flags);
-        layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V, "weight", bid), {n_embd_, n_embd_v_}, flags);
+        layer.wq = create_tensor_lb(tn(LLM_TENSOR_ATTN_Q, "weight", bid), n_embd_, n_embd_q_, flags);
+        layer.wk = create_tensor_lb(tn(LLM_TENSOR_ATTN_K, "weight", bid), n_embd_, n_embd_k_, flags);
+        layer.wv = create_tensor_lb(tn(LLM_TENSOR_ATTN_V, "weight", bid), n_embd_, n_embd_v_, flags);
         layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q, "bias", bid), {n_embd_q_}, TENSOR_NOT_REQUIRED);
         layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K, "bias", bid), {n_embd_k_}, TENSOR_NOT_REQUIRED);
         layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", bid), {n_embd_v_}, TENSOR_NOT_REQUIRED);

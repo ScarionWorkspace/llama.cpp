@@ -746,6 +746,24 @@ struct llama_hadamard {
     llama_hadamard_rotations inv; // latent lookup table -> inverse transform
 };
 
+// LittleBit: a linear layer stored as sign factors instead of a dense weight
+//   y = sum over paths of  mul_mat(u, pad(mul_mat(v, x * g)))
+// u: Q1_0 [r_pad, n_out], row scale h; v: Q1_0 [n_in, r], row scale l; g: F32 [n_in]
+// the second path (residual) is optional. See littlebit-gguf docs/FORMAT.md
+struct llama_lb_path {
+    ggml_tensor * u = nullptr;
+    ggml_tensor * v = nullptr;
+    ggml_tensor * g = nullptr;
+};
+
+struct llama_lb_weight {
+    llama_lb_path main;
+    llama_lb_path res; // all nullptr if the layer has no residual path
+};
+
+// stand-in weight tensor (= main.u) -> factors
+using llama_lb_weights = std::unordered_map<const ggml_tensor *, llama_lb_weight>;
+
 struct llama_rope_params {
     int32_t n_rot      = 0; // 0 if the layer has no RoPE
     int32_t n_offs     = 0; // first rotated dim in a cached K head
@@ -776,6 +794,9 @@ struct llama_model {
     llama_prec_policy prec_policy;
 
     llama_hadamard hdmd;
+
+    // LittleBit factorized weights, keyed by the stand-in tensor stored in the layer (e.g. layer.wq)
+    llama_lb_weights lb;
 
     // see llama_model_set_attn_rot
     bool attn_rot = true;
@@ -1068,6 +1089,11 @@ struct llama_model_base : public llama_model {
 
     // helper: make the prism.hadamard rotation and sign tensors for the folded weights
     void load_tensors_hadamard();
+
+    // helper: create a dense weight {n_in, n_out}, or, if the file has LittleBit factors
+    // "<name>.lb_u/lb_v/lb_g[_r]" instead, load those and return lb_u as the stand-in weight.
+    // build_lora_mm then computes the factorized product for it.
+    ggml_tensor * create_tensor_lb(const LLM_TN_IMPL & tn, int64_t n_in, int64_t n_out, int flags);
 
     // helper: read the SWA pattern as one flag per layer, or as a period expanded by set_swa_pattern
     void load_swa_pattern(llama_model_loader & ml, uint32_t n_pattern, bool dense_first = false);

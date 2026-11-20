@@ -38,15 +38,15 @@ void llama_model_qwen3::load_arch_tensors(llama_model_loader &) {
         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
 
         create_tensor_qkv(layer, i, n_embd, n_embd_head_k * n_head, n_embd_gqa, n_embd_gqa, 0);
-        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+        layer.wo = create_tensor_lb(tn(LLM_TENSOR_ATTN_OUT, "weight", i), n_embd_head_k * n_head, n_embd, 0);
 
         layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
         layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
 
         layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
-        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
-        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
-        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+        layer.ffn_gate = create_tensor_lb(tn(LLM_TENSOR_FFN_GATE, "weight", i), n_embd,   n_ff, 0);
+        layer.ffn_down = create_tensor_lb(tn(LLM_TENSOR_FFN_DOWN, "weight", i),   n_ff, n_embd, 0);
+        layer.ffn_up   = create_tensor_lb(tn(LLM_TENSOR_FFN_UP,   "weight", i), n_embd,   n_ff, 0);
     }
 }
 

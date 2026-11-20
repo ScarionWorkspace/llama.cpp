@@ -20,6 +20,7 @@ struct ggml_tensor;
 struct llama_cparams;
 struct llama_layer;
 struct llama_model;
+struct llama_lb_weight;
 struct llama_prec_policy;
 struct llama_hadamard;
 
@@ -1131,6 +1132,11 @@ struct llm_graph_context {
               ggml_tensor * w,
               ggml_tensor * cur,
               ggml_tensor * w_s = nullptr) const;
+
+    // LittleBit factorized product for a weight registered in model.lb
+    ggml_tensor * build_lb_mm(
+        const llama_lb_weight & lw,
+              ggml_tensor * cur) const;
 
     // do mat_mul_id, while optionally apply lora and per-expert scale
     // if slots is set, the experts are selected by slots instead of ids, from the MoE cache if cached (see build_moe_cache_slots)

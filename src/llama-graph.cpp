@@ -1684,10 +1684,44 @@ ggml_tensor * llm_graph_context::build_rope_indexer(ggml_tensor * cur, ggml_tens
     return rp.n_rot > 0 && rp.n_offs > 0 ? ggml_rope_set_offset(res, rp.n_offs) : res;
 }
 
+ggml_tensor * llm_graph_context::build_lb_mm(
+    const llama_lb_weight & lw,
+          ggml_tensor * cur) const {
+    const auto path = [&](const llama_lb_path & p) {
+        // the row scales l (of v) and h (of u) are the Q1_0 block scales, only g is applied here
+        ggml_tensor * t = ggml_mul(ctx0, cur, p.g);
+        t = ggml_mul_mat(ctx0, p.v, t);
+        // u is padded to a multiple of the Q1_0 block size along the rank; pad the latent with zeros
+        const int64_t pad = p.u->ne[0] - t->ne[0];
+        if (pad > 0) {
+            t = ggml_pad(ctx0, t, (int) pad, 0, 0, 0);
+        }
+        return ggml_mul_mat(ctx0, p.u, t);
+    };
+
+    ggml_tensor * res = path(lw.main);
+    if (lw.res.u) {
+        res = ggml_add(ctx0, res, path(lw.res));
+    }
+    return res;
+}
+
 ggml_tensor * llm_graph_context::build_lora_mm(
           ggml_tensor * w,
           ggml_tensor * cur,
           ggml_tensor * w_s) const {
+    if (!model.lb.empty()) {
+        const auto it = model.lb.find(w);
+        if (it != model.lb.end()) {
+            GGML_ASSERT(loras->empty() && "LoRA adapters on LittleBit weights are not supported");
+            ggml_tensor * res = build_lb_mm(it->second, cur);
+            if (w_s) {
+                res = ggml_mul(ctx0, res, w_s);
+            }
+            return res;
+        }
+    }
+
     // a Hadamard-folded weight reads the transformed input; a LoRA delta lives in the primal basis and reads `cur`
     ggml_tensor * cur_mm = build_hadamard_input(w, cur);
     ggml_tensor * res = ggml_mul_mat(ctx0, w, cur_mm);
