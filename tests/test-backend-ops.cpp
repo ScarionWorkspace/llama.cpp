@@ -4080,6 +4080,64 @@ struct test_rms_norm_back : public test_case {
 };
 
 // GGML_OP_RMS_NORM + GGML_OP_MUL + GGML_OP_ADD (+ GGML_OP_MUL)
+// LittleBit linear layer as built by build_lb_mm in llama-graph.cpp:
+// y = mul_mat(U, pad(mul_mat(V, x * g))) [+ same with U_R, V_R, g_R]
+struct test_littlebit_linear : public test_case {
+    const int64_t n_in;
+    const int64_t n_out;
+    const int64_t r;
+    const int64_t n_tokens;
+    const bool residual;
+
+    std::string op_desc(ggml_tensor * t) override {
+        GGML_UNUSED(t);
+        return "LITTLEBIT_LINEAR";
+    }
+
+    bool run_whole_graph() override { return true; }
+
+    std::string vars() override {
+        return VARS_TO_STR5(n_in, n_out, r, n_tokens, residual);
+    }
+
+    // the CPU reference quantizes activations to Q8_0, a fused backend may not
+    double max_nmse_err() override {
+        return 5e-4;
+    }
+
+    test_littlebit_linear(int64_t n_in = 256, int64_t n_out = 128, int64_t r = 40, int64_t n_tokens = 1, bool residual = true)
+        : n_in(n_in), n_out(n_out), r(r), n_tokens(n_tokens), residual(residual) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        const int64_t r_pad = (r + 127) / 128 * 128;
+
+        ggml_tensor * x = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_in, n_tokens);
+        ggml_set_param(x);
+        ggml_set_name(x, "x");
+
+        auto path = [&](const char * sfx) {
+            ggml_tensor * g = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_in);
+            ggml_tensor * v = ggml_new_tensor_2d(ctx, GGML_TYPE_Q1_0, n_in, r);
+            ggml_tensor * u = ggml_new_tensor_2d(ctx, GGML_TYPE_Q1_0, r_pad, n_out);
+            ggml_set_name(g, (std::string("g") + sfx).c_str());
+            ggml_set_name(v, (std::string("v") + sfx).c_str());
+            ggml_set_name(u, (std::string("u") + sfx).c_str());
+            ggml_tensor * t = ggml_mul_mat(ctx, v, ggml_mul(ctx, x, g));
+            if (r_pad > r) {
+                t = ggml_pad(ctx, t, (int) (r_pad - r), 0, 0, 0);
+            }
+            return ggml_mul_mat(ctx, u, t);
+        };
+
+        ggml_tensor * out = path("");
+        if (residual) {
+            out = ggml_add(ctx, out, path("_r"));
+        }
+        ggml_set_name(out, "out");
+        return out;
+    }
+};
+
 struct test_rms_norm_mul_add : public test_case {
     const ggml_type type;
     const std::array<int64_t, 4> ne;
@@ -13210,6 +13268,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.n_out, n, littlebit_rpad(p.r), {1, 1}, {1, 1}));
         }
     }
+    for (bool residual : {true, false}) {
+        for (int64_t n : {1, 3, 8, 9}) {
+            test_cases.emplace_back(new test_littlebit_linear(256, 128, 40, n, residual));
+            test_cases.emplace_back(new test_littlebit_linear(384, 200, 128, n, residual));
+        }
+    }
+    for (const auto & p : littlebit_qwen3_8b) {
+        test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, 1, true));
+        test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, 5, true));
+    }
 
     return test_cases;
 }
@@ -13808,6 +13876,11 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.r, n, p.n_in, {1, 1}, {1, 1}));
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.n_out, n, littlebit_rpad(p.r), {1, 1}, {1, 1}));
             test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, p.n_out, n, p.n_in, {1, 1}, {1, 1}));
+        }
+    }
+    for (const auto & p : littlebit_qwen3_8b) {
+        for (int64_t n : {1, 4, 512}) {
+            test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, n, true));
         }
     }
 

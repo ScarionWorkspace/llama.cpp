@@ -41,6 +41,7 @@
 #include "ggml-cuda/opt-step-sgd.cuh"
 #include "ggml-cuda/out-prod.cuh"
 #include "ggml-cuda/pad.cuh"
+#include "ggml-cuda/littlebit.cuh"
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/pool1d.cuh"
 #include "ggml-cuda/quantize.cuh"
@@ -4217,6 +4218,17 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     }
 
     ggml_tensor * node = cgraph->nodes[i];
+
+    if (node->op == GGML_OP_MUL) {
+        ggml_cuda_lb_match lb;
+        if (ggml_cuda_lb_match_fusion(cgraph, i, lb)) {
+            const int out = i + lb.n_nodes - 1;
+            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, lb.n_nodes, &out, 1)) {
+                ggml_cuda_lb_fused(*cuda_ctx, lb);
+                return lb.n_nodes - 1;
+            }
+        }
+    }
 
     if (node->op == GGML_OP_MUL_MAT_ID && cuda_ctx->stream_context().concurrent_events.empty() &&
             ggml_cuda_match_shared_expert(cgraph, i, i + 3) &&
