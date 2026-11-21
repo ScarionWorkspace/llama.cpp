@@ -10441,6 +10441,15 @@ static const ggml_type other_types[] = {
 #endif
 
 // Test cases for evaluation: should try to cover edge cases while using small input sizes to keep the runtime low
+// LittleBit (see src/llama-model.cpp create_tensor_lb): a linear layer is two Q1_0 sign factors,
+// V [n_in, r] and U [r_pad, n_out] (r_pad = r rounded up to 128). Shapes of Qwen3-8B @ 0.55 bpw:
+// {n_in, n_out, r} for q/o, k/v and gate/up/down.
+struct littlebit_proj { int64_t n_in, n_out, r; };
+static const littlebit_proj littlebit_qwen3_8b[] = {
+    {4096, 4096, 544}, {4096, 1024, 208}, {4096, 12288, 824}, {12288, 4096, 824},
+};
+static int64_t littlebit_rpad(int64_t r) { return (r + 127) / 128 * 128; }
+
 static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     std::vector<std::unique_ptr<test_case>> test_cases;
     std::default_random_engine rng(0);
@@ -13193,6 +13202,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // LittleBit factor shapes: rank r is not a multiple of the block size on the output side (V),
+    // and the padded rank r_pad is the reduction dim of U
+    for (const auto & p : littlebit_qwen3_8b) {
+        for (int64_t n : {1, 7}) {
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.r, n, p.n_in, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.n_out, n, littlebit_rpad(p.r), {1, 1}, {1, 1}));
+        }
+    }
+
     return test_cases;
 }
 #ifdef _MSC_VER
@@ -13782,6 +13800,16 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_perf() {
         test_cases.emplace_back(new test_l2_norm_batch(GGML_TYPE_F32, { n, 16, 16, 1 }, 4, 1e-12f, true));
     }
 
+
+    // LittleBit Qwen3-8B @ 0.55 bpw: both Q1_0 factor matmuls of each projection, next to the dense
+    // Q4_K matmul of the same projection for reference; n = 1 (decode) and 512 (prompt)
+    for (const auto & p : littlebit_qwen3_8b) {
+        for (int64_t n : {1, 512}) {
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.r, n, p.n_in, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q1_0, GGML_TYPE_F32, p.n_out, n, littlebit_rpad(p.r), {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(GGML_TYPE_Q4_K, GGML_TYPE_F32, p.n_out, n, p.n_in, {1, 1}, {1, 1}));
+        }
+    }
 
     return test_cases;
 }
