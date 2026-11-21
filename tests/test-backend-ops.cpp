@@ -13282,6 +13282,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             for (int n_proj : {1, 2}) {
                 test_cases.emplace_back(new test_littlebit_linear(256, 128, 40, n, residual, n_proj));
                 test_cases.emplace_back(new test_littlebit_linear(384, 200, 128, n, residual, n_proj));
+                test_cases.emplace_back(new test_littlebit_linear(128, 130, 40, n, residual, n_proj)); // n_out % 4 != 0: not fused
             }
         }
     }
