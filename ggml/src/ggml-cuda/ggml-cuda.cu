@@ -4222,8 +4222,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
     if (node->op == GGML_OP_MUL) {
         ggml_cuda_lb_match lb;
         if (ggml_cuda_lb_match_fusion(cgraph, i, lb)) {
-            const int out = i + lb.n_nodes - 1;
-            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, lb.n_nodes, &out, 1)) {
+            if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, lb.n_nodes, lb.outputs, lb.n_outputs)) {
                 ggml_cuda_lb_fused(*cuda_ctx, lb);
                 return lb.n_nodes - 1;
             }

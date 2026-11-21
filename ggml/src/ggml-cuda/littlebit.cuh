@@ -7,17 +7,27 @@
 // For few tokens each node is a tiny kernel, so run the chain as 2 kernels instead.
 // Activations stay F32 (no Q8_1), so the result is at least as exact as the unfused chain.
 
-struct ggml_cuda_lb_match {
-    int n_nodes = 0;
-    const ggml_tensor * x = nullptr;
+// larger batches use the unfused path (MMQ is fast there)
+#define GGML_CUDA_LB_MAX_TOKENS 8
+// consecutive projections with the same input and shape (e.g. ffn_gate + ffn_up) share the 2 kernels
+#define GGML_CUDA_LB_MAX_PROJ 2
+
+struct ggml_cuda_lb_proj {
     const ggml_tensor * v[2] = { nullptr, nullptr };
     const ggml_tensor * u[2] = { nullptr, nullptr };
     const ggml_tensor * g[2] = { nullptr, nullptr };
     ggml_tensor * dst = nullptr; // ADD (residual) or the last MUL_MAT
 };
 
-// larger batches use the unfused path (MMQ is fast there)
-#define GGML_CUDA_LB_MAX_TOKENS 8
+struct ggml_cuda_lb_match {
+    int n_nodes = 0;
+    int n_proj  = 0;
+    int n_paths = 0;
+    const ggml_tensor * x = nullptr;
+    ggml_cuda_lb_proj proj[GGML_CUDA_LB_MAX_PROJ];
+    int outputs[8]; // node indices used outside the fused range
+    int n_outputs = 0;
+};
 
 bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_lb_match & m);
 

@@ -21,12 +21,17 @@ static __device__ __forceinline__ float lb_dot4(const float4 a, const float4 b) 
     return a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
 }
 
-// t[p][c][i] = sum_j V_p[i, j] * g_p[j] * x[c][j], rows r .. r_pad-1 are zero (replaces the PAD node)
+// path q = proj*n_paths + p
+struct lb_ptrs {
+    const block_q1_0 * v[2*GGML_CUDA_LB_MAX_PROJ];
+    const block_q1_0 * u[2*GGML_CUDA_LB_MAX_PROJ];
+    const float      * g[2*GGML_CUDA_LB_MAX_PROJ];
+    float            * dst[GGML_CUDA_LB_MAX_PROJ];
+};
+
+// t[q][c][i] = sum_j V_q[i, j] * g_q[j] * x[c][j], rows r .. r_pad-1 are zero (replaces the PAD node)
 template <int ncols>
-static __global__ void lb_stage_a(
-        const block_q1_0 * __restrict__ v0, const block_q1_0 * __restrict__ v1,
-        const float * __restrict__ g0, const float * __restrict__ g1,
-        const float * __restrict__ x, float * __restrict__ t,
+static __global__ void lb_stage_a(const lb_ptrs ptrs, const float * __restrict__ x, float * __restrict__ t,
         const int n_in, const int r, const int r_pad, const int64_t x_stride, const int64_t v_row_blocks) {
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
     __shared__ float partial[LB_A_WARPS][LB_A_ROWS][ncols];
@@ -37,8 +42,8 @@ static __global__ void lb_stage_a(
     const int lane = threadIdx.x;
     const int warp = threadIdx.y;
 
-    const block_q1_0 * vp = path == 0 ? v0 : v1;
-    const float * g = path == 0 ? g0 : g1;
+    const block_q1_0 * vp = ptrs.v[path];
+    const float * g = ptrs.g[path];
 
     float acc[LB_A_ROWS][ncols] = { { 0.0f } };
     for (int j = 4*(warp*warp_size + lane); j < n_in; j += 4*warp_size*LB_A_WARPS) {
@@ -90,22 +95,22 @@ static __global__ void lb_stage_a(
 
 // y[c][o] = sum_p sum_k U_p[o, k] * t[p][c][k] (the ADD of the residual path is done here)
 template <int ncols>
-static __global__ void lb_stage_b(
-        const block_q1_0 * __restrict__ u0, const block_q1_0 * __restrict__ u1,
-        const float * __restrict__ t, float * __restrict__ y,
-        const int n_out, const int r_pad, const int64_t y_stride, const int64_t u_row_blocks) {
+static __global__ void lb_stage_b(const lb_ptrs ptrs, const float * __restrict__ t,
+        const int n_proj, const int n_paths, const int n_out, const int r_pad, const int64_t y_stride, const int64_t u_row_blocks) {
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
-    const int o    = blockIdx.x * blockDim.y + threadIdx.y;
+    const int row  = blockIdx.x * blockDim.y + threadIdx.y;
     const int lane = threadIdx.x;
-    if (o >= n_out) {
+    if (row >= n_proj*n_out) {
         return;
     }
+    const int proj = row / n_out;
+    const int o    = row % n_out;
 
     float acc[ncols] = { 0.0f };
-    const int n_paths = u1 ? 2 : 1;
     for (int p = 0; p < n_paths; ++p) {
-        const block_q1_0 * urow = (p == 0 ? u0 : u1) + o*u_row_blocks;
-        const float * tp = t + (int64_t) p * ncols * r_pad;
+        const int q = proj*n_paths + p;
+        const block_q1_0 * urow = ptrs.u[q] + o*u_row_blocks;
+        const float * tp = t + (int64_t) q * ncols * r_pad;
         for (int k = 4*lane; k < r_pad; k += 4*warp_size) {
             float d;
             const float4 s4 = lb_q1_0_signs4(urow, k, d);
@@ -120,7 +125,7 @@ static __global__ void lb_stage_b(
     for (int c = 0; c < ncols; ++c) {
         const float sum = warp_reduce_sum<warp_size>(acc[c]);
         if (lane == 0) {
-            y[c*y_stride + o] = sum;
+            ptrs.dst[proj][c*y_stride + o] = sum;
         }
     }
 }
@@ -185,44 +190,83 @@ static bool lb_match_path(const ggml_cgraph * cgraph, int idx, int & n, const gg
     return true;
 }
 
-bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_lb_match & m) {
+// one projection starting at node idx: main path, optional residual path + ADD
+static bool lb_match_proj(const ggml_cgraph * cgraph, int idx, int & count, const ggml_tensor *& x, ggml_cuda_lb_proj & pr) {
     int n0 = 0;
-    if (!lb_match_path(cgraph, node_idx, n0, m.x, m.v[0], m.u[0], m.g[0])) {
+    if (!lb_match_path(cgraph, idx, n0, x, pr.v[0], pr.u[0], pr.g[0])) {
         return false;
     }
-    const ggml_tensor * mmu0 = cgraph->nodes[node_idx + n0 - 1];
+    const ggml_tensor * mmu0 = cgraph->nodes[idx + n0 - 1];
+    count  = n0;
+    pr.dst = (ggml_tensor *) mmu0;
+    pr.v[1] = pr.u[1] = pr.g[1] = nullptr;
 
     int n1 = 0;
     const ggml_tensor * x1 = nullptr;
-    int count = n0;
-    m.dst = (ggml_tensor *) mmu0;
-    if (lb_match_path(cgraph, node_idx + n0, n1, x1, m.v[1], m.u[1], m.g[1]) && x1 == m.x &&
-            node_idx + n0 + n1 < cgraph->n_nodes) {
-        const ggml_tensor * mmu1 = cgraph->nodes[node_idx + n0 + n1 - 1];
-        ggml_tensor * add = cgraph->nodes[node_idx + n0 + n1];
-        const bool same_shape = m.v[1]->ne[1] == m.v[0]->ne[1] && m.u[1]->ne[0] == m.u[0]->ne[0] &&
-                                m.u[1]->ne[1] == m.u[0]->ne[1];
+    ggml_cuda_lb_proj res;
+    if (lb_match_path(cgraph, idx + n0, n1, x1, res.v[0], res.u[0], res.g[0]) && x1 == x && idx + n0 + n1 < cgraph->n_nodes) {
+        const ggml_tensor * mmu1 = cgraph->nodes[idx + n0 + n1 - 1];
+        ggml_tensor * add = cgraph->nodes[idx + n0 + n1];
+        const bool same_shape = res.v[0]->ne[1] == pr.v[0]->ne[1] && res.u[0]->ne[0] == pr.u[0]->ne[0] &&
+                                res.u[0]->ne[1] == pr.u[0]->ne[1];
         if (add->op == GGML_OP_ADD && same_shape &&
                 ((add->src[0] == mmu0 && add->src[1] == mmu1) || (add->src[0] == mmu1 && add->src[1] == mmu0)) &&
-                add->type == GGML_TYPE_F32 && ggml_is_contiguous(add)) {
-            count = n0 + n1 + 1;
-            m.dst = add;
-        } else {
-            m.v[1] = m.u[1] = m.g[1] = nullptr;
+                add->type == GGML_TYPE_F32) {
+            pr.v[1] = res.v[0];
+            pr.u[1] = res.u[0];
+            pr.g[1] = res.g[0];
+            pr.dst  = add;
+            count   = n0 + n1 + 1;
         }
-    } else {
-        m.v[1] = m.u[1] = m.g[1] = nullptr;
     }
-    if (!ggml_is_contiguous(m.dst)) {
+    return ggml_is_contiguous(pr.dst);
+}
+
+static bool lb_same_shape(const ggml_cuda_lb_proj & a, const ggml_cuda_lb_proj & b) {
+    return (a.v[1] != nullptr) == (b.v[1] != nullptr) && a.v[0]->ne[1] == b.v[0]->ne[1] &&
+           a.u[0]->ne[0] == b.u[0]->ne[0] && a.u[0]->ne[1] == b.u[0]->ne[1];
+}
+
+bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_lb_match & m) {
+    int count = 0;
+    if (!lb_match_proj(cgraph, node_idx, count, m.x, m.proj[0])) {
         return false;
     }
+    m.n_proj  = 1;
+    m.n_paths = m.proj[0].v[1] ? 2 : 1;
+    m.n_outputs = 0;
+    m.outputs[m.n_outputs++] = node_idx + count - 1;
 
-    enum ggml_op ops[16];
+    // append following projections with the same input, skipping view nodes (e.g. a RESHAPE of the previous result)
+    while (m.n_proj < GGML_CUDA_LB_MAX_PROJ) {
+        int j = node_idx + count;
+        int views[2];
+        int n_views = 0;
+        while (j < cgraph->n_nodes && n_views < 2 && (cgraph->nodes[j]->op == GGML_OP_RESHAPE || cgraph->nodes[j]->op == GGML_OP_VIEW)) {
+            views[n_views++] = j++;
+        }
+        int n = 0;
+        const ggml_tensor * x = nullptr;
+        ggml_cuda_lb_proj pr;
+        if (j >= cgraph->n_nodes || !lb_match_proj(cgraph, j, n, x, pr) || x != m.x || !lb_same_shape(pr, m.proj[0])) {
+            break;
+        }
+        for (int k = 0; k < n_views; ++k) {
+            m.outputs[m.n_outputs++] = views[k];
+        }
+        m.proj[m.n_proj++] = pr;
+        count = j + n - node_idx;
+        m.outputs[m.n_outputs++] = node_idx + count - 1;
+    }
+
+    enum ggml_op ops[32];
+    if (count > 31) {
+        return false;
+    }
     for (int i = 0; i < count; ++i) {
         ops[i] = cgraph->nodes[node_idx + i]->op;
     }
-    const int out = node_idx + count - 1;
-    if (!ggml_can_fuse_subgraph(cgraph, node_idx, count, ops, &out, 1)) {
+    if (!ggml_can_fuse_subgraph(cgraph, node_idx, count, ops, m.outputs, m.n_outputs)) {
         return false;
     }
     m.n_nodes = count;
@@ -231,27 +275,35 @@ bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cu
 
 template <int ncols>
 static void lb_launch(ggml_backend_cuda_context & ctx, const ggml_cuda_lb_match & m, cudaStream_t stream) {
+    const ggml_cuda_lb_proj & p0 = m.proj[0];
     const int n_in  = m.x->ne[0];
-    const int r     = m.v[0]->ne[1];
-    const int r_pad = m.u[0]->ne[0];
-    const int n_out = m.u[0]->ne[1];
-    const int n_paths = m.v[1] ? 2 : 1;
+    const int r     = p0.v[0]->ne[1];
+    const int r_pad = p0.u[0]->ne[0];
+    const int n_out = p0.u[0]->ne[1];
+    const int n_q   = m.n_proj * m.n_paths;
 
-    ggml_cuda_pool_alloc<float> t(ctx.pool(), (size_t) n_paths * ncols * r_pad);
+    lb_ptrs ptrs = {};
+    for (int k = 0; k < m.n_proj; ++k) {
+        for (int p = 0; p < m.n_paths; ++p) {
+            ptrs.v[k*m.n_paths + p] = (const block_q1_0 *) m.proj[k].v[p]->data;
+            ptrs.u[k*m.n_paths + p] = (const block_q1_0 *) m.proj[k].u[p]->data;
+            ptrs.g[k*m.n_paths + p] = (const float *) m.proj[k].g[p]->data;
+        }
+        ptrs.dst[k] = (float *) m.proj[k].dst->data;
+    }
+
+    ggml_cuda_pool_alloc<float> t(ctx.pool(), (size_t) n_q * ncols * r_pad);
 
     const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
     GGML_ASSERT(r_pad % LB_A_ROWS == 0 && LB_A_ROWS*ncols <= LB_A_WARPS*warp_size);
 
-    lb_stage_a<ncols><<<n_paths * r_pad / LB_A_ROWS, dim3(warp_size, LB_A_WARPS, 1), 0, stream>>>(
-        (const block_q1_0 *) m.v[0]->data, m.v[1] ? (const block_q1_0 *) m.v[1]->data : nullptr,
-        (const float *) m.g[0]->data, m.g[1] ? (const float *) m.g[1]->data : nullptr,
-        (const float *) m.x->data, t.get(), n_in, r, r_pad,
-        m.x->nb[1] / sizeof(float), m.v[0]->nb[1] / sizeof(block_q1_0));
+    lb_stage_a<ncols><<<n_q * r_pad / LB_A_ROWS, dim3(warp_size, LB_A_WARPS, 1), 0, stream>>>(
+        ptrs, (const float *) m.x->data, t.get(), n_in, r, r_pad,
+        m.x->nb[1] / sizeof(float), p0.v[0]->nb[1] / sizeof(block_q1_0));
 
-    lb_stage_b<ncols><<<(n_out + LB_B_WARPS - 1) / LB_B_WARPS, dim3(warp_size, LB_B_WARPS, 1), 0, stream>>>(
-        (const block_q1_0 *) m.u[0]->data, m.u[1] ? (const block_q1_0 *) m.u[1]->data : nullptr,
-        t.get(), (float *) m.dst->data, n_out, r_pad,
-        m.dst->nb[1] / sizeof(float), m.u[0]->nb[1] / sizeof(block_q1_0));
+    lb_stage_b<ncols><<<(m.n_proj*n_out + LB_B_WARPS - 1) / LB_B_WARPS, dim3(warp_size, LB_B_WARPS, 1), 0, stream>>>(
+        ptrs, t.get(), m.n_proj, m.n_paths, n_out, r_pad,
+        p0.dst->nb[1] / sizeof(float), p0.u[0]->nb[1] / sizeof(block_q1_0));
 }
 
 void ggml_cuda_lb_fused(ggml_backend_cuda_context & ctx, const ggml_cuda_lb_match & m) {

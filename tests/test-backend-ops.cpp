@@ -4088,6 +4088,7 @@ struct test_littlebit_linear : public test_case {
     const int64_t r;
     const int64_t n_tokens;
     const bool residual;
+    const int n_proj; // projections with the same input, summed at the end (like ffn_gate + ffn_up)
 
     std::string op_desc(ggml_tensor * t) override {
         GGML_UNUSED(t);
@@ -4097,7 +4098,7 @@ struct test_littlebit_linear : public test_case {
     bool run_whole_graph() override { return true; }
 
     std::string vars() override {
-        return VARS_TO_STR5(n_in, n_out, r, n_tokens, residual);
+        return VARS_TO_STR6(n_in, n_out, r, n_tokens, residual, n_proj);
     }
 
     // the CPU reference quantizes activations to Q8_0, a fused backend may not
@@ -4105,8 +4106,8 @@ struct test_littlebit_linear : public test_case {
         return 5e-4;
     }
 
-    test_littlebit_linear(int64_t n_in = 256, int64_t n_out = 128, int64_t r = 40, int64_t n_tokens = 1, bool residual = true)
-        : n_in(n_in), n_out(n_out), r(r), n_tokens(n_tokens), residual(residual) {}
+    test_littlebit_linear(int64_t n_in = 256, int64_t n_out = 128, int64_t r = 40, int64_t n_tokens = 1, bool residual = true, int n_proj = 1)
+        : n_in(n_in), n_out(n_out), r(r), n_tokens(n_tokens), residual(residual), n_proj(n_proj) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const int64_t r_pad = (r + 127) / 128 * 128;
@@ -4115,13 +4116,13 @@ struct test_littlebit_linear : public test_case {
         ggml_set_param(x);
         ggml_set_name(x, "x");
 
-        auto path = [&](const char * sfx) {
+        auto path = [&](const std::string & sfx) {
             ggml_tensor * g = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_in);
             ggml_tensor * v = ggml_new_tensor_2d(ctx, GGML_TYPE_Q1_0, n_in, r);
             ggml_tensor * u = ggml_new_tensor_2d(ctx, GGML_TYPE_Q1_0, r_pad, n_out);
-            ggml_set_name(g, (std::string("g") + sfx).c_str());
-            ggml_set_name(v, (std::string("v") + sfx).c_str());
-            ggml_set_name(u, (std::string("u") + sfx).c_str());
+            ggml_set_name(g, ("g" + sfx).c_str());
+            ggml_set_name(v, ("v" + sfx).c_str());
+            ggml_set_name(u, ("u" + sfx).c_str());
             ggml_tensor * t = ggml_mul_mat(ctx, v, ggml_mul(ctx, x, g));
             if (r_pad > r) {
                 t = ggml_pad(ctx, t, (int) (r_pad - r), 0, 0, 0);
@@ -4129,9 +4130,17 @@ struct test_littlebit_linear : public test_case {
             return ggml_mul_mat(ctx, u, t);
         };
 
-        ggml_tensor * out = path("");
-        if (residual) {
-            out = ggml_add(ctx, out, path("_r"));
+        std::vector<ggml_tensor *> ys;
+        for (int k = 0; k < n_proj; ++k) {
+            ggml_tensor * y = path(std::to_string(k));
+            if (residual) {
+                y = ggml_add(ctx, y, path(std::to_string(k) + "_r"));
+            }
+            ys.push_back(y);
+        }
+        ggml_tensor * out = ys[0];
+        for (int k = 1; k < n_proj; ++k) {
+            out = ggml_add(ctx, out, ys[k]);
         }
         ggml_set_name(out, "out");
         return out;
@@ -13270,13 +13279,15 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     }
     for (bool residual : {true, false}) {
         for (int64_t n : {1, 3, 8, 9}) {
-            test_cases.emplace_back(new test_littlebit_linear(256, 128, 40, n, residual));
-            test_cases.emplace_back(new test_littlebit_linear(384, 200, 128, n, residual));
+            for (int n_proj : {1, 2}) {
+                test_cases.emplace_back(new test_littlebit_linear(256, 128, 40, n, residual, n_proj));
+                test_cases.emplace_back(new test_littlebit_linear(384, 200, 128, n, residual, n_proj));
+            }
         }
     }
     for (const auto & p : littlebit_qwen3_8b) {
         test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, 1, true));
-        test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, 5, true));
+        test_cases.emplace_back(new test_littlebit_linear(p.n_in, p.n_out, p.r, 5, true, 2));
     }
 
     return test_cases;
