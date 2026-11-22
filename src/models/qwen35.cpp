@@ -70,7 +70,7 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
         if (!hparams.is_recr(il)) {
             // Attention layers
             create_tensor_qkv(layer, il, n_embd, n_embd_head_k * n_head * 2, n_embd_k_gqa, n_embd_v_gqa, flags);
-            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", il), { n_embd_head_k * n_head, n_embd }, flags);
+            layer.wo = create_tensor_lb(tn(LLM_TENSOR_ATTN_OUT, "weight", il), n_embd_head_k * n_head, n_embd, flags);
 
             // Q/K normalization for attention layers
             layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", il), { n_embd_head_k }, flags);
@@ -78,20 +78,20 @@ void llama_model_qwen35::load_arch_tensors(llama_model_loader & ml) {
         } else {
             // Linear attention (gated delta net) specific tensors
             // Create tensors with calculated dimensions
-            layer.wqkv           = create_tensor(tn(LLM_TENSOR_ATTN_QKV,       "weight", il), { n_embd, key_dim * 2 + value_dim }, TENSOR_NOT_REQUIRED);
-            layer.wqkv_gate      = create_tensor(tn(LLM_TENSOR_ATTN_GATE,      "weight", il), { n_embd, value_dim }, TENSOR_NOT_REQUIRED);
+            layer.wqkv           = create_tensor_lb(tn(LLM_TENSOR_ATTN_QKV,       "weight", il), n_embd, key_dim * 2 + value_dim, TENSOR_NOT_REQUIRED);
+            layer.wqkv_gate      = create_tensor_lb(tn(LLM_TENSOR_ATTN_GATE,      "weight", il), n_embd, value_dim, TENSOR_NOT_REQUIRED);
             layer.ssm_conv1d     = create_tensor(tn(LLM_TENSOR_SSM_CONV1D,     "weight", il), { hparams.ssm_d_conv, conv_dim }, flags);
             layer.ssm_dt         = create_tensor(tn(LLM_TENSOR_SSM_DT,         "bias",   il), { hparams.ssm_dt_rank }, flags);
             layer.ssm_a          = create_tensor(tn(LLM_TENSOR_SSM_A_NOSCAN,             il), { hparams.ssm_dt_rank }, flags);
-            layer.ssm_beta       = create_tensor(tn(LLM_TENSOR_SSM_BETA,       "weight", il), { n_embd, n_v_heads }, flags);
-            layer.ssm_alpha      = create_tensor(tn(LLM_TENSOR_SSM_ALPHA,      "weight", il), { n_embd, n_v_heads }, flags);
+            layer.ssm_beta       = create_tensor_lb(tn(LLM_TENSOR_SSM_BETA,       "weight", il), n_embd, n_v_heads, flags);
+            layer.ssm_alpha      = create_tensor_lb(tn(LLM_TENSOR_SSM_ALPHA,      "weight", il), n_embd, n_v_heads, flags);
             layer.ssm_norm       = create_tensor(tn(LLM_TENSOR_SSM_NORM,       "weight", il), { head_v_dim }, flags);
-            layer.ssm_out        = create_tensor(tn(LLM_TENSOR_SSM_OUT,        "weight", il), { value_dim, n_embd }, flags);
+            layer.ssm_out        = create_tensor_lb(tn(LLM_TENSOR_SSM_OUT,        "weight", il), value_dim, n_embd, flags);
         }
 
-        layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", il), {n_embd,   n_ff}, flags);
-        layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", il), {  n_ff, n_embd}, flags);
-        layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", il), {n_embd,   n_ff}, flags);
+        layer.ffn_gate = create_tensor_lb(tn(LLM_TENSOR_FFN_GATE, "weight", il), n_embd,   n_ff, flags);
+        layer.ffn_down = create_tensor_lb(tn(LLM_TENSOR_FFN_DOWN, "weight", il),   n_ff, n_embd, flags);
+        layer.ffn_up   = create_tensor_lb(tn(LLM_TENSOR_FFN_UP,   "weight", il), n_embd,   n_ff, flags);
     };
 
     auto load_block_mtp = [&](int il) {
