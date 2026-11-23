@@ -2,6 +2,9 @@
 
 #include "ggml-impl.h"
 
+#include <cstdlib>
+#include <cstring>
+
 // Each lane handles LB_CHUNK = 32 consecutive elements (a quarter Q1_0 block), so a warp covers 32 chunks per step
 // and more loads are in flight. Stage A splits the reduction over LB_A_WARPS warps per block (LB_A_ROWS rows per
 // block share the activation loads), stage B uses LB_B_ROWS rows per warp that share the latent loads.
@@ -262,6 +265,21 @@ static bool lb_match_proj(const ggml_cgraph * cgraph, int idx, int & count, cons
 static bool lb_same_shape(const ggml_cuda_lb_proj & a, const ggml_cuda_lb_proj & b) {
     return (a.v[1] != nullptr) == (b.v[1] != nullptr) && a.v[0]->ne[1] == b.v[0]->ne[1] &&
            a.u[0]->ne[0] == b.u[0]->ne[0] && a.u[0]->ne[1] == b.u[0]->ne[1];
+}
+
+bool ggml_cuda_lb_fusion_enabled(const int cc) {
+    // -1: not set, 0: off, 1: on
+    static const int forced = [] {
+        const char * env = getenv("GGML_CUDA_LB_FUSION");
+        if (env == nullptr || env[0] == '\0') {
+            return -1;
+        }
+        return (strcmp(env, "0") == 0 || strcmp(env, "off") == 0 || strcmp(env, "false") == 0) ? 0 : 1;
+    }();
+    if (forced >= 0) {
+        return forced == 1;
+    }
+    return GGML_CUDA_CC_IS_AMD(cc);
 }
 
 bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_lb_match & m) {

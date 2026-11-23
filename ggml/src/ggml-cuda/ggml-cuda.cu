@@ -4219,7 +4219,7 @@ static int ggml_cuda_try_fuse(ggml_backend_cuda_context * cuda_ctx, ggml_cgraph 
 
     ggml_tensor * node = cgraph->nodes[i];
 
-    if (node->op == GGML_OP_MUL) {
+    if (node->op == GGML_OP_MUL && ggml_cuda_lb_fusion_enabled(ggml_cuda_info().devices[cuda_ctx->device].cc)) {
         ggml_cuda_lb_match lb;
         if (ggml_cuda_lb_match_fusion(cgraph, i, lb)) {
             if (ggml_cuda_check_fusion_memory_ranges(cgraph, i, lb.n_nodes, lb.outputs, lb.n_outputs)) {
