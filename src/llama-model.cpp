@@ -4058,6 +4058,17 @@ ggml_tensor * llama_model_base::create_tensor_lb(const LLM_TN_IMPL & tn_w, int64
         return create_tensor(tn_w, {n_in, n_out}, flags);
     }
 
+    // shared format (littlebit-gguf docs/FORMAT.md): format_version 1 = lb_v padded to r_pad,
+    // 2 = lb_v at the true rank r. Both are read from the shapes below. Older files of ours carry
+    // littlebit.version = 1 with the version-2 layout. Refuse versions we do not know.
+    uint32_t lb_format = 0;
+    if (!ml->get_key(std::string("littlebit.format_version"), lb_format, false)) {
+        ml->get_key(std::string("littlebit.version"), lb_format, false);
+    }
+    if (lb_format > 2) {
+        throw std::runtime_error(format("unsupported LittleBit format version %u (this build reads 1 and 2)", lb_format));
+    }
+
     const auto load_path = [&](const char * su, const char * sv, const char * sg, int path_flags) {
         llama_lb_path p;
         const ggml_tensor * um = ml->get_tensor_meta(name(su).str().c_str());
