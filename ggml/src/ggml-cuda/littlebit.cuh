@@ -29,6 +29,13 @@ struct ggml_cuda_lb_match {
     int n_outputs = 0;
 };
 
+// Whether to use the fused kernels on a device of compute capability cc. Default: AMD only.
+// On an NVIDIA RTX A1000 (Ampere) the fused path measured about 2x slower than the unfused chain
+// for generation (GeniusDevam/littlebit-gguf#1), so other vendors keep the unfused chain until
+// the kernels are tuned there. GGML_CUDA_LB_FUSION=1 forces it on, =0 off, on any device.
+// GGML_CUDA_DISABLE_FUSION still turns off all fusion, this one included.
+bool ggml_cuda_lb_fusion_enabled(int cc);
+
 bool ggml_cuda_lb_match_fusion(const ggml_cgraph * cgraph, int node_idx, ggml_cuda_lb_match & m);
 
 void ggml_cuda_lb_fused(ggml_backend_cuda_context & ctx, const ggml_cuda_lb_match & m);
